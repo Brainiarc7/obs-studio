@@ -243,6 +243,7 @@ struct obs_core_video {
 	int                             cur_texture;
 
 	uint64_t                        video_time;
+	double                          video_fps;
 	video_t                         *video;
 	pthread_t                       video_thread;
 	uint32_t                        total_frames;
@@ -592,6 +593,7 @@ struct obs_source {
 	int                             async_plane_offset[2];
 	bool                            async_flip;
 	bool                            async_active;
+	bool                            async_update_texture;
 	DARRAY(struct async_frame)      async_cache;
 	DARRAY(struct obs_source_frame*)async_frames;
 	pthread_mutex_t                 async_mutex;

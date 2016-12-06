@@ -338,7 +338,7 @@ static obs_source_t *obs_source_create_internal(const char *id,
 	if (!source->context.data)
 		blog(LOG_ERROR, "Failed to create source '%s'!", name);
 
-	blog(private ? LOG_DEBUG : LOG_INFO, "%ssource '%s' (%s) created",
+	blog(LOG_DEBUG, "%ssource '%s' (%s) created",
 			private ? "private " : "", name, id);
 	obs_source_dosignal(source, "source_create", NULL);
 
@@ -410,7 +410,9 @@ obs_source_t *obs_source_duplicate(obs_source_t *source,
 		obs_scene_t *new_scene = obs_scene_duplicate(scene, new_name,
 				create_private ? OBS_SCENE_DUP_PRIVATE_COPY :
 					OBS_SCENE_DUP_COPY);
-		return obs_scene_get_source(new_scene);
+		obs_source_t *new_source = obs_scene_get_source(new_scene);
+		duplicate_filters(new_source, source, create_private);
+		return new_source;
 	}
 
 	settings = obs_data_create();
@@ -490,8 +492,7 @@ void obs_source_destroy(struct obs_source *source)
 
 	obs_context_data_remove(&source->context);
 
-	blog(source->context.private ? LOG_DEBUG : LOG_INFO,
-			"%ssource '%s' destroyed",
+	blog(LOG_DEBUG, "%ssource '%s' destroyed",
 			source->context.private ? "private " : "",
 			source->context.name);
 
@@ -920,6 +921,35 @@ void obs_source_deactivate(obs_source_t *source, enum view_type type)
 
 static inline struct obs_source_frame *get_closest_frame(obs_source_t *source,
 		uint64_t sys_time);
+bool set_async_texture_size(struct obs_source *source,
+		const struct obs_source_frame *frame);
+
+static void async_tick(obs_source_t *source)
+{
+	uint64_t sys_time = obs->video.video_time;
+
+	pthread_mutex_lock(&source->async_mutex);
+
+	if (deinterlacing_enabled(source)) {
+		deinterlace_process_last_frame(source, sys_time);
+	} else {
+		if (source->cur_async_frame) {
+			remove_async_frame(source,
+					source->cur_async_frame);
+			source->cur_async_frame = NULL;
+		}
+
+		source->cur_async_frame = get_closest_frame(source,
+				sys_time);
+	}
+
+	source->last_sys_timestamp = sys_time;
+	pthread_mutex_unlock(&source->async_mutex);
+
+	if (source->cur_async_frame)
+		source->async_update_texture = set_async_texture_size(source,
+				source->cur_async_frame);
+}
 
 void obs_source_video_tick(obs_source_t *source, float seconds)
 {
@@ -931,27 +961,8 @@ void obs_source_video_tick(obs_source_t *source, float seconds)
 	if (source->info.type == OBS_SOURCE_TYPE_TRANSITION)
 		obs_transition_tick(source);
 
-	if ((source->info.output_flags & OBS_SOURCE_ASYNC) != 0) {
-		uint64_t sys_time = obs->video.video_time;
-
-		pthread_mutex_lock(&source->async_mutex);
-
-		if (deinterlacing_enabled(source)) {
-			deinterlace_process_last_frame(source, sys_time);
-		} else {
-			if (source->cur_async_frame) {
-				remove_async_frame(source,
-						source->cur_async_frame);
-				source->cur_async_frame = NULL;
-			}
-
-			source->cur_async_frame = get_closest_frame(source,
-					sys_time);
-		}
-
-		source->last_sys_timestamp = sys_time;
-		pthread_mutex_unlock(&source->async_mutex);
-	}
+	if ((source->info.output_flags & OBS_SOURCE_ASYNC) != 0)
+		async_tick(source);
 
 	if (source->defer_update)
 		obs_source_deferred_update(source);
@@ -1332,6 +1343,8 @@ bool set_async_texture_size(struct obs_source *source,
 	source->async_height = frame->height;
 	source->async_format = frame->format;
 
+	gs_enter_context(obs->video.graphics);
+
 	gs_texture_destroy(source->async_texture);
 	gs_texture_destroy(source->async_prev_texture);
 	gs_texrender_destroy(source->async_texrender);
@@ -1365,6 +1378,8 @@ bool set_async_texture_size(struct obs_source *source,
 
 	if (deinterlacing_enabled(source))
 		set_deinterlace_texture_size(source);
+
+	gs_leave_context();
 
 	return !!source->async_texture;
 }
@@ -1613,10 +1628,11 @@ static void obs_source_update_async_video(obs_source_t *source)
 				os_gettime_ns() - frame->timestamp;
 			source->timing_set = true;
 
-			if (set_async_texture_size(source, frame)) {
+			if (source->async_update_texture) {
 				update_async_texture(source, frame,
 						source->async_texture,
 						source->async_texrender);
+				source->async_update_texture = false;
 			}
 
 			obs_source_release_frame(source, frame);
@@ -1864,8 +1880,7 @@ void obs_source_filter_add(obs_source_t *source, obs_source_t *filter)
 	signal_handler_signal(source->context.signals, "filter_add", &cd);
 
 	if (source && filter)
-		blog(source->context.private ? LOG_DEBUG : LOG_INFO,
-				"- filter '%s' (%s) added to source '%s'",
+		blog(LOG_DEBUG, "- filter '%s' (%s) added to source '%s'",
 				filter->context.name, filter->info.id,
 				source->context.name);
 }
@@ -1901,8 +1916,7 @@ static bool obs_source_filter_remove_refless(obs_source_t *source,
 	signal_handler_signal(source->context.signals, "filter_remove", &cd);
 
 	if (source && filter)
-		blog(source->context.private ? LOG_DEBUG : LOG_INFO,
-				"- filter '%s' (%s) removed from source '%s'",
+		blog(LOG_DEBUG, "- filter '%s' (%s) removed from source '%s'",
 				filter->context.name, filter->info.id,
 				source->context.name);
 
